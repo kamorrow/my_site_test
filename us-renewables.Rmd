@@ -6,6 +6,187 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Attach packages
+```{r}
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(here)
+library(paletteer)
+library(tsibble)
+library(fable)
+library(fabletools)
+library(feasts)
+library(forecast)
+library(sf)
+library(tmap)
+library(mapview)
+```
+
+## Monthly US Energy Consumption for Renewables
+```{r}
+us_renew <- read_csv(here("data", "renewables_cons_prod.csv")) %>%
+  janitor::clean_names()
+```
+
+- Make description all lowercase
+- Only keep observations where `description` contains "consumption"
+- Remove observation where `description` contains "total"
+
+```{r}
+renew_clean <- us_renew %>%
+  mutate(description = str_to_lower(description)) %>%
+  filter(str_detect(description, pattern = "consumption")) %>% 
+  filter(!str_detect(description, pattern = "total")) # can also use negate = TRUE instead of !
+```
+
+### Convert `yyyymm` to date
+
+```{r}
+renew_date <- renew_clean %>%
+  mutate(yr_mo_day = lubridate::parse_date_time(yyyymm, "ym")) %>% #automatically adds day as the first of the month
+  mutate(month_sep = yearmonth(yr_mo_day)) %>% # store a tsiblle specific class yearmonth in prep
+  mutate(value = as.numeric(value)) %>%
+  drop_na(month_sep, value)
+
+# parse the year and month for use later.
+renew_parsed <-renew_date %>% 
+  mutate(month = month(yr_mo_day, label = TRUE)) %>% 
+  mutate(year = year(yr_mo_day))
+
+```
+
+### Make a ggplot
+
+Make, then save, the baseline plot as `renew_gg`:
+
+```{r}
+renew_gg <- ggplot(data = renew_date,
+                   aes(x = month_sep,
+                       y = value,
+                       group = description)) + # redundant due to aes(color = description) in next line
+  geom_line(aes(color = description)) +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 350))
+  
+
+renew_gg
+```
+
+### Updating colors with `paletteer` Palettes
+
+The above data is discrete, so we're looking for discrete palettes in paletteer using `view(palettes_d_names)`
+
+```{r}
+renew_gg +
+  scale_color_paletteer_d("calecopal::figmtn")
+
+renew_gg +
+  scale_color_paletteer_d("palettesForR::Inkscape")
+
+renew_gg +
+  scale_color_paletteer_d("trekcolors::klingon")
+	
+renew_gg +
+  scale_color_paletteer_d("LaCroixColoR::Tangerine")
+```
+
+### Coerce renew_parsed to tsibble
+
+```{r}
+renew_ts <- as_tsibble(renew_parsed, key = description, index = month_sep)
+```
+
+Let's look at time series data in a couple way
+```{r}
+renew_ts %>% autoplot(value) # if key is indicated above, auto groups data
+renew_ts %>% gg_subseries(value)
+# renew_ts %>% gg_season(value) # broken ;/
+
+ggplot(data = renew_parsed,
+       aes(x = month,
+           y = value,
+           group = year)) +
+  geom_line(aes(color = year)) +
+  facet_wrap(~ description,
+             ncol = 1,
+             scales = "free",
+             strip.position = "right")
+
+```
+
+### Hydroelectric Power Only
+```{r}
+hydro_ts <- renew_ts %>%
+  filter(description == "hydroelectric power consumption")
+
+hydro_ts %>% autoplot(value)
+hydro_ts %>% gg_subseries(value)
+
+ggplot(hydro_ts,
+       aes(x = month,
+           y = value,
+           group = year)) +
+  geom_line(aes(color = year))
+```
+
+### Quarterly Average Consumption of Hydroelectric Power
+```{r}
+hydro_quarterly <- hydro_ts %>%
+  index_by(year_qu = ~(yearquarter(.))) %>% #coerce to quarters based on existing key (.)
+  summarize(avg_consumption = mean(value))
+
+head(hydro_quarterly)
+```
+
+### Decompose Hydro Time Series data
+
+```{r}
+dcmp <- hydro_ts %>%
+  model(STL(value ~ season(window = 5)))
+
+# show components from decomposition and plot them
+components(dcmp) %>% autoplot()
+```
+
+```{r}
+hist(components(dcmp)$remainder)
+```
+
+Autocorellation Function (ACF)
+```{r}
+hydro_ts %>%
+  ACF(value) %>%  # the function from feast
+  autoplot()
+```
+Shows high seasonal correlation, lag of 12 has highest corr
+
+# DANGER ZONE
+More research required for future endeavours
+Be sure to consider how valid predictions may be
+Comparisons of model types can  reinforce predictions powerfully
+
+```{r}
+hydro_model <- hydro_ts %>%
+  model(
+    ARIMA(value)
+  ) %>%
+  fabletools::forecast(h = "4 years")
+
+hydro_model %>% autoplot # plot just model
+hydro_model %>% autoplot(filter(hydro_ts, year(month_sep) > 2010)) # include data used to make predictions
+```
+
+
+### Make a world map!
+using mapview
+```{r}
+world <- read_sf(dsn = here("data", "TM_WORLD_BORDERS_SIMPL-0.3-1"),
+                 layer = "TM_WORLD_BORDERS_SIMPL-0.3")
+
+mapview(world)
 ```
 
